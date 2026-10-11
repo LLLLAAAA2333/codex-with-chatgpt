@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { evidenceSchema } from "../session/handoff.js";
 import { ensureDir, getStateDir } from "../config/paths.js";
 
 /**
@@ -13,6 +14,9 @@ import { ensureDir, getStateDir } from "../config/paths.js";
  * meant Codex, but the record itself does not say so.
  */
 export const executionRecordSchema = z.object({
+  evidence: evidenceSchema.optional(),
+  command: z.string().optional(),
+  exitCode: z.number().int().nullable().optional(),
   taskId: z.string(),
   iteration: z.number().int().nonnegative(),
   changedFiles: z.union([z.array(z.string()), z.number().int().nonnegative()]),
@@ -57,4 +61,8 @@ export function readExecutionRecords(workspaceId: string, limit = 10): Execution
 export function latestExecutionRecord(workspaceId: string): ExecutionRecord | null {
   const records = readExecutionRecords(workspaceId, 1);
   return records[records.length - 1] ?? null;
+}
+
+export function executionFor(workspaceId: string, taskId: string, iteration: number): ExecutionRecord | null {
+  return readExecutionRecords(workspaceId, Number.MAX_SAFE_INTEGER).reverse().find(r => r.taskId === taskId && r.iteration === iteration) ?? null;
 }

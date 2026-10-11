@@ -154,6 +154,20 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(textOf(result)).toContain("PATH_OUTSIDE_WORKSPACE");
   });
 
+  it("denies direct Git metadata access through every path-taking MCP tool", async () => {
+    for (const request of [
+      { name:"read_file", arguments:{path:".git/config"} },
+      { name:"read_image", arguments:{path:".git/config"} },
+      { name:"list_directory", arguments:{path:".git"} },
+      { name:"search_workspace", arguments:{query:"repositoryformatversion",path:".git"} },
+    ]) {
+      const result = await client.callTool(request);
+      expect(result.isError, request.name).toBe(true);
+      expect(textOf(result)).toContain("ACCESS_DENIED_SENSITIVE_FILE");
+      expect(textOf(result)).not.toContain("repositoryformatversion =");
+    }
+  });
+
   it("list_directory lists the tree", async () => {
     const result = await client.callTool({ name: "list_directory", arguments: { path: ".", depth: 2 } });
     const listing = structuredJsonOf<{ entries: { path: string }[] }>(result);

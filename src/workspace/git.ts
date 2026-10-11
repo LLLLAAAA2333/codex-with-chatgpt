@@ -9,12 +9,14 @@ export interface GitCommandResult {
 }
 
 export function runGit(root: string, args: string[]): GitCommandResult {
-  const result = spawnSync("git", args, {
+  const safeArgs = args[0] === "diff" ? ["diff", "--no-ext-diff", "--no-textconv", ...args.slice(1)] : args;
+  const result = spawnSync("git", ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...safeArgs], {
     cwd: root,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: 30_000,
     windowsHide: true,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_PAGER: "cat" },
   });
   return {
     ok: result.status === 0,
@@ -37,7 +39,7 @@ export function gitInfo(root: string): GitInfo {
     return { isRepo: false, branch: null, commit: null, dirty: false };
   }
   const branch = runGit(root, ["rev-parse", "--abbrev-ref", "HEAD"]);
-  const commit = runGit(root, ["rev-parse", "--short", "HEAD"]);
+  const commit = runGit(root, ["rev-parse", "HEAD"]);
   // Pathspec confines the result to the workspace subtree even when the
   // workspace root sits inside a larger repository.
   const status = runGit(root, ["status", "--porcelain", "--", "."]);
@@ -134,6 +136,8 @@ export function gitStatus(target: GitTarget): GitStatusResult {
 export type DiffMode = "unstaged" | "staged" | "head";
 
 export interface GitDiffOptions {
+  /** Internal approved baseline only; never an arbitrary MCP argument. */
+  baseCommit?: string;
   mode?: DiffMode;
   path?: string;
   offset?: number;
@@ -200,7 +204,8 @@ export function gitDiff(
   const mode = opts.mode ?? "unstaged";
   const offset = Math.max(0, Math.floor(opts.offset ?? 0));
   const maxBytes = Math.min(256 * 1024, Math.max(1024, Math.floor(opts.maxBytes ?? 64 * 1024)));
-  const modeArgs = getDiffModeArgs(mode);
+  if (opts.baseCommit && !/^[a-f0-9]{40,64}$/.test(opts.baseCommit)) throw new Error("Invalid baseline commit");
+  const modeArgs = opts.baseCommit ? [opts.baseCommit] : getDiffModeArgs(mode);
 
   // 1. Full-workspace inventory using NUL separation and global rename detection
   const listArgs = [

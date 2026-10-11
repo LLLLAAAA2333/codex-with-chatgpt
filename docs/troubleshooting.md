@@ -1,171 +1,48 @@
 # Troubleshooting
 
-First move, always:
+Start with the saved task, not a reconnect:
 
-```
-c2c doctor
-```
-
-It checks Node, workspace, bridge, MCP, OAuth and tunnel — and repairs what it
-can (restarts the bridge, restarts the tunnel) without asking.
-
-## Common situations
-
-### "Bridge 未运行"
-`c2c start` (or let doctor do it). Bridge logs:
-`c2c logs`, or verbose: `c2c logs --verbose`.
-
-If doctor says the bridge state is **uncertain** (无法确认), do not start a
-second bridge and do not Delete the ChatGPT connector. Wait and run doctor
-again. The local process may still be running.
-
-### Codex Web GPT launcher or model catalog is missing
-
-This repository installs the Codex Skill and the C2C Bridge. It does **not**
-ship the separate `Codex Web GPT` desktop launcher or the native Codex model
-catalog UI. If that launcher says **Install into Codex / 安装到 Codex** is
-incomplete, separate route installation from catalog verification:
-
-- The launcher can successfully write its local `openai_base_url` route while
-  the existing Codex process is still using the old configuration.
-- Fully quit Codex, including its background/tray `ChatGPT.exe` process on
-  Microsoft Store Windows installations, then reopen it. Closing only the
-  window is not a restart. Keep the launcher open while it verifies the
-  catalog.
-- Repeating the install step does not reload an already-running Codex process.
-  It only writes the same route again and can reset the pending verification
-  state.
-
-For the C2C repository itself, verify the checkout and installed Skill path,
-rebuild with `corepack pnpm install && corepack pnpm build`, then run:
-
-```
-c2c doctor --json -w <workspace>
-c2c status --json -w <workspace>
+```sh
+c2c session --json -w <project>
+c2c plan show -w <project>
 ```
 
-If those checks are healthy but the separate Web GPT launcher or model picker
-still fails, capture the OS, Codex version, launcher version, exact UI error,
-and timestamp for the launcher issue. Do not change tunnel settings or delete
-the saved route as a workaround: the launcher owns its route backup and is
-expected to restore it when its Bridge is turned off.
+- **Code baseline changed:** inspect the differences, discuss any assumption or
+  scope conflict, then obtain human confirmation of a new plan revision. Do not
+  silently replace the approval.
+- **Task already started:** resume from checkpoint and actual code. Do not begin
+  a second execution. If a record exists, export it.
+- **Message outcome unknown:** keep delivery uncertain and inspect the exact
+  message ID in the intended recipient chat. Ask the human to confirm receipt if
+  necessary. Never treat a send attempt as receipt or re-run code after a timeout.
+- **Browser unavailable:** `handoff export --task <id> --iteration <n>` provides the
+  manual copy/paste packet. Inspect it before sharing. No connection repair is
+  required for this path.
+- **Damaged session:** preserve the file. Recover the matching archived plan and
+  execution record with human review; do not delete it and start a new task.
+- **Log unavailable/restricted/truncated:** report that limitation. Inspect saved
+  code evidence; do not claim missing test evidence passed.
+- **ACCESS_DENIED_SENSITIVE_FILE:** expected for Git metadata, known credential
+  names, custom denied paths and their canonical aliases. Do not weaken the rule
+  to obtain Git information; use `workspace_info`, `git_status`, `git_diff`.
 
-### Everything was quit and ChatGPT can no longer connect
-Quitting Codex / the terminal stops the public address. The next `c2c doctor`
-starts a new address and sets `chatgptRepair.needed`. The Skill should tell the
-user that the old address expired, then **Delete** THIS workspace's
-connector (`chatgptRepair.connectorName`) and create it again with the new
-address (never click Reconnect — the old URL is dead). Other workspaces keep
-their own connectors so two projects can stay connected at once.
+## Explicitly requested live connections
 
-Mint the pairing code only when the ChatGPT Authorize form is on screen
-(`c2c pair`). After the connector is recreated, doctor being green is not
-enough: the saved ChatGPT conversation must pass `workspace_info` again. If
-that old chat still cannot read the workspace, open a new chat in the same
-Project (or switch long-chat) and continue there.
+`c2c doctor --no-fix -w <project>` diagnoses. Default doctor behavior is also
+non-repairing. `c2c doctor --fix` can start/restart bridge or tunnel; explain and
+obtain repair permission first. Neither doctor nor setup edits Codex configuration.
+Use `sandbox-allow` only after configuration permission.
 
-Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
+If bridge state is uncertain, do not spawn a second bridge or delete a connector.
+A failed probe is not evidence the process stopped. If a temporary public address
+expired, repair only after authorization, then revalidate the intended workspace.
+Saved conversation replacement must not discard the approved plan/checkpoint.
 
-- Developer mode: https://chatgpt.com/#settings/Security
-- Plugins hub (manage existing connectors): https://chatgpt.com/plugins
-- Add a connector:
-  https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins
+Do not install missing cloudflared/dependencies, create OAuth authorization,
+modify a connector or restart services silently. Ask permission for the specific
+operation and retain the manual handoff alternative if declined.
 
-### Tunnel URL unreachable / ChatGPT says the connector is broken
-Same as above: `c2c doctor`, then Delete + recreate THIS workspace's
-connector if `chatgptRepair.needed`. Mint a pairing code with `c2c pair` only
-when the Authorize form is on screen.
-If this workspace uses a stable hostname, doctor sets `namedRepair` instead —
-re-login to Cloudflare (`c2c tunnel login`) and doctor again. Do not Delete
-the connector; the address did not change.
-
-### I have a Cloudflare domain and want a stable hostname
-During first-time setup (or the next coding session, once), say you have a
-Cloudflare account and give the domain. Codex opens a browser for Cloudflare
-login, then keeps `c2c-<project>.your-domain.com`. To stay on the temporary
-address, say you do not have a domain. Switching later: tell Codex you want
-the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
-
-### "配对码无效/过期"
-Pairing codes are one-time and expire after ~5 minutes. Generate one only
-when the ChatGPT Authorize page is ready:
-
-```
-c2c pair
-```
-
-Older codes become invalid immediately. Do not mint a code during `c2c doctor`.
-
-### Temporary address keeps dropping on a UDP-filtered network
-cloudflared defaults to QUIC. If the tunnel reconnects over and over on a
-corporate network, set `C2C_TUNNEL_PROTOCOL=http2` and restart the bridge.
-Leave it unset to keep cloudflared's default.
-
-### ChatGPT gets 401 on every tool call
-The access token expired and refresh failed (e.g. after `c2c unpair` or a
-long offline period). Delete THIS workspace's connector if the address also
-changed; otherwise run Authorize again in ChatGPT and enter a fresh pairing
-code. Never use Reconnect when the public address has been replaced.
-
-### cloudflared is not installed
-macOS: `brew install cloudflared`
-Windows: `winget install Cloudflare.cloudflared`
-Linux: see Cloudflare's package instructions.
-The Skill installs this automatically during setup.
-If cloudflared is installed in a custom location that is not on `PATH`, set
-`C2C_CLOUDFLARED_PATH` to the executable's absolute path before running `c2c`.
-
-### Every new Codex chat “repairs” the connection / cannot write logs
-The C2C state directory lives outside the project (macOS:
-`~/Library/Application Support/codex-with-chatgpt`; Windows:
-`%LOCALAPPDATA%\codex-with-chatgpt`). Codex's default sandbox cannot write
-there, so each new chat looks like a health-check failure.
-
-`c2c setup`, `c2c doctor` and `c2c sandbox-allow` add that directory to
-`[sandbox_workspace_write].writable_roots` in `<codex-home>/config.toml`, where
-`<codex-home>` is a non-empty `CODEX_HOME` when set, otherwise `~/.codex`
-(`%USERPROFILE%\.codex` on Windows). After that, later chats do not need
-elevation.
-
-### Port already in use
-Handled automatically: an existing healthy bridge for the same workspace is
-reused; anything else makes the bridge pick a free port. Configuration follows
-automatically.
-
-### Fixed hostname is configured, but the Named Tunnel does not start on Windows
-`cert.pem` and the Named Tunnel credential are different files. `cert.pem`
-proves that `cloudflared` has an account certificate; the tunnel still needs
-`%USERPROFILE%\.cloudflared\<TUNNEL-UUID>.json` (or the file selected by
-`TUNNEL_CRED_FILE`) to run. `c2c doctor --json` reports whether the certificate
-is missing, the credential is missing or unreadable, the JSON is invalid, or
-the saved Tunnel ID does not match. It never prints credential contents or
-repairs the file automatically.
-
-When the diagnostic says the credential is missing, recover the credential for
-the existing Tunnel with `cloudflared tunnel token --cred-file` and then run
-`c2c doctor` again. Do not paste the generated credential into ChatGPT or a
-project file.
-
-### Reading a file returns ACCESS_DENIED_SENSITIVE_FILE
-Working as intended: `.env`, keys, credentials and anything matched by
-`.c2cignore` are never readable through ChatGPT. `.env.example` is allowed.
-
-### I cannot see Projects in the ChatGPT sidebar
-Hover **Chats** /「聊天」, click the … that appears, and choose
-**Organize by project** /「按项目整理」. Then create a project named after
-this workspace, with **project-only memory**. Tell Codex「好了」when the
-collection page is open (`https://chatgpt.com/g/g-p-…/project`).
-
-### This workspace opened the wrong ChatGPT Project
-Do not pick another project by name automatically. Open the collection that
-matches this workspace and tell Codex「已找到」, or say you want the old
-long-chat instead. Each workspace has its own Project and its own connector.
-
-### Completely stuck
-```
-c2c stop
-c2c setup
-```
-
-re-creates the bridge, tunnel and pairing session from scratch. Existing
-authorizations stay valid unless you also ran `c2c unpair`.
+Updates are human-triggered. Inspect branch and local changes first; never auto-
+stash. Dependency installation, installed Skill replacement and service restart
+require the corresponding authorization. Keep approval archives and execution
+records when updating.

@@ -76,5 +76,5 @@ export function connectorNameFor(opts: {
 }
 
 export function reclaimUserMessage(connectorName: string): string {
-  return `当前项目的安全连接地址已经失效。我会删除「${connectorName}」再按新地址加回去，其它项目的连接不动。请稍等。`;
+  return `当前项目的连接地址已经失效。修复可能需要删除并重新创建「${connectorName}」，只涉及这个项目；确认连接和授权范围后再操作，也可先用手动交接继续。`;
 }

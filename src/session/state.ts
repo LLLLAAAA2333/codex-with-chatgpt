@@ -8,6 +8,7 @@ export type ConversationReason = "existing-long-chat" | "project" | "new-workspa
 
 export type ProtocolState =
   | "INIT"
+  | "PLAN_APPROVED"
   | "PLAN_RECEIVED"
   | "EXECUTING"
   | "EXECUTED_LOCAL"
@@ -19,6 +20,7 @@ export type WaitingFor = "none" | "GPT_PLAN" | "GPT_REVIEW" | "USER";
 
 export const PROTOCOL_STATES: readonly ProtocolState[] = [
   "INIT",
+  "PLAN_APPROVED",
   "PLAN_RECEIVED",
   "EXECUTING",
   "EXECUTED_LOCAL",
@@ -29,11 +31,27 @@ export const PROTOCOL_STATES: readonly ProtocolState[] = [
 
 export const WAITING_FOR: readonly WaitingFor[] = ["none", "GPT_PLAN", "GPT_REVIEW", "USER"];
 
+export interface ApprovedPlanRef {
+  taskId: string;
+  revision: number;
+  digest: string;
+}
+
+export interface Delivery {
+  messageId: string;
+  evidenceId: string;
+  status: "prepared" | "uncertain" | "confirmed";
+  confirmation?: string;
+}
+
 export interface TaskCheckpoint {
   taskId: string;
   iteration: number;
   protocolState: ProtocolState;
   waitingFor: WaitingFor;
+  approvedPlan?: ApprovedPlanRef;
+  delivery?: Delivery;
+  review?: { evidenceId: string; reviewer: string; checked: string[]; decision: "accept" | "changes_requested" | "needs_user"; notes: string; source: "reviewer_report" };
   originalGoal?: string;
   completedSubtasks?: string;
   knownIssues?: string;
@@ -85,7 +103,15 @@ export function sessionFile(workspaceId: string): string {
 }
 
 export function readSession(workspaceId: string): SavedSession | null {
-  return readJsonIfExists<SavedSession>(sessionFile(workspaceId));
+  const file = sessionFile(workspaceId);
+  if (!fs.existsSync(file)) return null;
+  const saved = readJsonIfExists<SavedSession>(file);
+  if (!saved || typeof saved.savedAt !== "string") throw new Error("Session is damaged; preserve it and recover before continuing.");
+  if (saved.checkpoint && (!saved.checkpoint.taskId || !PROTOCOL_STATES.includes(saved.checkpoint.protocolState) ||
+      !WAITING_FOR.includes(saved.checkpoint.waitingFor) || !Number.isInteger(saved.checkpoint.iteration) || saved.checkpoint.iteration < 0)) {
+    throw new Error("Session checkpoint is damaged; preserve it and recover before continuing.");
+  }
+  return saved;
 }
 
 export function writeSession(workspaceId: string, session: SavedSession): SavedSession {
@@ -177,6 +203,10 @@ function capCheckpointText(value: string | undefined, max: number): string | und
 }
 
 export function mergeSession(previous: SavedSession | null, patch: SessionPatch): SavedSession {
+  const requestedTask = patch.checkpoint?.taskId ?? patch.taskId;
+  if (requestedTask && requestedTask !== (previous?.checkpoint?.taskId ?? previous?.taskId)) {
+    previous = previous ? { ...previous, taskId: undefined, iteration: undefined, lastState: undefined, checkpoint: undefined } : null;
+  }
   const conversationMode = patch.conversationMode ?? previous?.conversationMode;
   const rawProjectUrl = patch.projectUrl ?? previous?.projectUrl;
   let projectUrl = rawProjectUrl;
@@ -201,6 +231,9 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
     throw new Error("nothing to save: pass --url, --project-url, or --mode");
   }
 
+  if (previous?.checkpoint && patch.iteration !== undefined && patch.iteration !== previous.checkpoint.iteration) {
+    previous = { ...previous, checkpoint: { ...previous.checkpoint, delivery: undefined, review: undefined } };
+  }
   let checkpoint = previous?.checkpoint;
   if (patch.clearCheckpoint) {
     checkpoint = undefined;
@@ -228,6 +261,9 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
       iteration,
       protocolState,
       waitingFor,
+      approvedPlan: patch.checkpoint.approvedPlan ?? previous?.checkpoint?.approvedPlan,
+      delivery: patch.checkpoint.delivery ?? previous?.checkpoint?.delivery,
+      review: patch.checkpoint.review ?? previous?.checkpoint?.review,
       originalGoal: capCheckpointText(
         patch.checkpoint.originalGoal ?? previous?.checkpoint?.originalGoal,
         CHECKPOINT_LIMITS.originalGoal
@@ -274,11 +310,16 @@ export function clearChatPointer(workspaceId: string): { cleared: boolean; keptP
       conversationMode: "project",
       projectUrl: view.projectUrl,
       connectorName: previous.connectorName,
-      checkpoint: previous.checkpoint,
+      taskId: previous.taskId,
+      iteration: previous.iteration,
+      checkpoint: previous.checkpoint ? { ...previous.checkpoint, chatUrl: undefined } : undefined,
       savedAt: new Date().toISOString(),
     });
     return { cleared: true, keptProject: true };
   }
-  fs.rmSync(sessionFile(workspaceId), { force: true });
+  if (previous.checkpoint) {
+    writeSession(workspaceId, { ...previous, url: undefined, title: undefined,
+      checkpoint: { ...previous.checkpoint, chatUrl: undefined }, savedAt: new Date().toISOString() });
+  } else fs.rmSync(sessionFile(workspaceId), { force: true });
   return { cleared: true, keptProject: false };
 }

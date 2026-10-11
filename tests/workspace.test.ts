@@ -219,3 +219,20 @@ describe("workspace identity", () => {
     cleanup(projectRoot);
   });
 });
+
+describe("Git metadata is sensitive, not only hidden", () => {
+  it("denies direct files, directories, aliases and worktree pointer files", async () => {
+    write(root, ".git/config", "synthetic git configuration\n");
+    write(root, "subproject/.git", "gitdir: /synthetic/not-read\n");
+    for (const name of [".git", ".git/config", "workspace:/.git/config", "subproject/.git", ".GIT/config"]) {
+      expect(() => ws.resolve(name)).toThrow(/sensitive/i);
+    }
+    expect(() => new Workspace(path.join(root,".git"))).toThrow(/Git metadata/);
+    await expect(ws.listDirectory(".git")).rejects.toMatchObject({code:"ACCESS_DENIED_SENSITIVE_FILE"});
+    await expect(ws.readFile(".git/config")).rejects.toMatchObject({code:"ACCESS_DENIED_SENSITIVE_FILE"});
+    if (symlinksReady) {
+      fs.symlinkSync(path.join(root,".git/config"),path.join(root,"metadata-alias.txt"));
+      expect(() => ws.resolve("metadata-alias.txt")).toThrow(/sensitive/i);
+    }
+  });
+});

@@ -99,6 +99,9 @@ export class Workspace {
     if (!fs.statSync(real).isDirectory()) {
       throw new WorkspaceError("NOT_A_DIRECTORY", `Workspace root is not a directory: ${rootInput}`);
     }
+    if ([resolved, real].some(candidate => candidate.split(path.sep).some(segment => segment.toLowerCase() === ".git"))) {
+      throw new WorkspaceError("ACCESS_DENIED_SENSITIVE_FILE", "Git metadata cannot be connected as a workspace.");
+    }
     this.root = real;
     this.id = createHash("sha256").update(normCase(real)).digest("hex").slice(0, 12);
     this.ignoreRules = new IgnoreRules(real);
@@ -149,6 +152,13 @@ export class Workspace {
     if (p === "") p = ".";
 
     const abs = path.resolve(this.root, p);
+    // Check the requested name as well as the resolved target. A sensitive
+    // name must not become readable by pointing a symlink at a public file.
+    const requestedRel = path.relative(this.root, abs).split(path.sep).join("/");
+    if (!opts.allowSensitive && this.contains(abs) && requestedRel &&
+        (this.ignoreRules.isSensitive(requestedRel) || this.ignoreRules.isSensitive(requestedRel + "/"))) {
+      throw new WorkspaceError("ACCESS_DENIED_SENSITIVE_FILE", "Sensitive path cannot be read.");
+    }
     const canonical = this.canonicalize(abs);
     if (!this.contains(canonical)) {
       throw new WorkspaceError(
@@ -160,7 +170,8 @@ export class Workspace {
     if (rel.startsWith("..")) {
       throw new WorkspaceError("PATH_OUTSIDE_WORKSPACE", `Path resolves outside the connected workspace: ${requested}`);
     }
-    if (!opts.allowSensitive && rel !== "" && this.ignoreRules.isSensitive(rel)) {
+    if (!opts.allowSensitive && rel !== "" &&
+        (this.ignoreRules.isSensitive(rel) || this.ignoreRules.isSensitive(rel + "/"))) {
       throw new WorkspaceError(
         "ACCESS_DENIED_SENSITIVE_FILE",
         `ACCESS_DENIED_SENSITIVE_FILE: '${rel}' matches the sensitive-file policy and cannot be read.`

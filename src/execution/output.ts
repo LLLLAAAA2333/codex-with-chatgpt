@@ -114,6 +114,7 @@ export function readExecutionOutput(
   if (!meta) return { ok: false, error: "NOT_FOUND" };
   if (!meta.allowed) return { ok: false, error: "OUTPUT_RESTRICTED" };
   const file = bodyFile(workspaceId, id);
+  if (meta.sizeBytes > 0 && !fs.existsSync(file)) return { ok: false, error: "NOT_FOUND" };
   const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   return { ok: true, meta, text };
 }

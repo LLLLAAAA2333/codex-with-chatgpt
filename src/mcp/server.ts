@@ -7,6 +7,8 @@ import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js"
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
 import type { Logger } from "../logger/index.js";
+import { activePlan } from "../session/handoff.js";
+import { readSession } from "../session/state.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 import { readWorkspaceImage } from "../workspace/media.js";
 
@@ -160,6 +162,8 @@ const testStatusOutputSchema = {
 };
 
 const executionSummaryOutputSchema = {
+  approvedPlan: z.unknown().optional(),
+  checkpoint: z.unknown().optional(),
   records: z.array(executionRecordSchema),
 };
 
@@ -451,7 +455,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
-      return okStructured({ records: readExecutionRecords(workspace.id, args.limit) });
+      return okStructured({ records: readExecutionRecords(workspace.id, args.limit), approvedPlan: activePlan(workspace), checkpoint: readSession(workspace.id)?.checkpoint ?? null });
     }
   );
 

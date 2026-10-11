@@ -31,8 +31,8 @@
 ## Principles
 
 - **ChatGPT thinks. Codex works.** The bridge never re-implements a coding harness.
-- **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
-- **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
+- **Delivery = notification**: optional browser messages or a versioned manual handoff packet.
+- **MCP = live read plane**: ChatGPT pulls files/diffs/search results itself. Saved packets preserve milestone evidence when live files change.
 - **Read-only by design**: no write/exec tools exist in V1 at all.
 - **Workspace is the security boundary**: one bridge = one workspace = one token audience.
 
@@ -68,13 +68,21 @@ whether the occupant is a c2c bridge for the same workspace (reuse) or not
 runtime state file; users never see ports.
 
 **Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
-The URL changes per start, so `c2c doctor` can restart it and tell the Skill to
+The URL changes per start, so explicitly authorized `c2c doctor --fix` can restart it and tell the Skill to
 Delete + recreate that workspace's ChatGPT connector. A workspace may instead
-choose a named hostname once (`c2c tunnel choose --mode named`). The Skill asks
-before the first public URL exists; `cloudflared tunnel login` is the only extra
+choose a named hostname once (`c2c tunnel choose --mode named`). The Skill obtains explicit permission
+before a public URL or OAuth authorization is created; `cloudflared tunnel login` is the only extra
 user step. Tunnel name, hostname and preference live under the OS state dir
 (`tunnels/<workspaceId>.json`), never in the project. Named starts use
 `cloudflared tunnel --url … run <name>` so the public URL stays stable. If named
 provisioning fails, C2C falls back to Quick Tunnel. If a named tunnel later
 drops, doctor asks for a Cloudflare re-login (`namedRepair`) instead of
 rotating the ChatGPT connector.
+
+## Human-approved handoff
+
+The existing session checkpoint references an immutable approved-plan revision.
+Execution JSONL records carry code fingerprints and saved review evidence.
+Delivery and reviewer reports live in the checkpoint. Local plan/record/export
+commands never start services. See [protocol](protocol.md). Doctor diagnoses by
+default; connection repair and Codex configuration changes are separate actions.

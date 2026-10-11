@@ -2,6 +2,7 @@ import { Command, InvalidArgumentError } from "commander";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
@@ -27,7 +28,7 @@ import {
   TUNNEL_CHOICE_PROMPT,
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
-import { getStateDir } from "../config/paths.js";
+import { getStateDir, writeSecureJson } from "../config/paths.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
 import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
 import {
@@ -56,9 +57,12 @@ import {
   type ProtocolState,
   type WaitingFor,
 } from "../session/state.js";
-import { appendExecutionRecord } from "../execution/records.js";
-import { saveExecutionOutput } from "../execution/output.js";
+import { appendExecutionRecord, executionFor } from "../execution/records.js";
+import { saveExecutionOutput, readExecutionOutput } from "../execution/output.js";
 import { importMediaAsset } from "../media/import.js";
+
+import { activePlan, approvePlan, beginPlan, captureEvidence, loadPlan, snapshotWorkspace } from "../session/handoff.js";
+import { sanitizeExecutionOutput } from "../execution/sanitize.js";
 
 const program = new Command();
 
@@ -297,7 +301,6 @@ program
         say("正在连接 ChatGPT…");
         say("");
       }
-      const sandbox = trySandboxAllow();
       const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
       const connectorName = mcpUrl
         ? persistWorkspaceEndpoint({
@@ -326,7 +329,7 @@ program
             local: mcpUrl === null,
             pairingCode: pairingResult.code,
             pairingExpiresAt: pairingResult.expiresAt,
-            sandbox,
+            sandbox: { changed: false, note: "Use sandbox-allow only after explicit permission." },
             tunnel: {
               mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
               hostname: tunnelState.hostname ?? null,
@@ -344,7 +347,7 @@ program
       say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
       say("");
       say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
-      say("如果你在使用 Codex Skill，这一步会自动完成。");
+      say("使用 Codex Skill 时，可在明确授权后协助完成这一步，也可手动配置。");
     } catch (error) {
       handleCliError(error, opts.json);
     }
@@ -423,9 +426,10 @@ program
 
 program
   .command("doctor")
-  .description("Diagnose and auto-repair the connection")
+  .description("Diagnose the connection; repair only with explicit --fix")
   .option("-w, --workspace <path>")
-  .option("--no-fix", "diagnose only, do not repair")
+  .option("--fix", "explicitly authorize connection repair (may start bridge/tunnel)", false)
+  .option("--no-fix", "diagnose only (default)")
   .option("--json", "machine-readable output", false)
   .action(async (opts: { workspace?: string; fix: boolean; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
@@ -436,25 +440,8 @@ program
     const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
     report.node = { ok: nodeMajor >= 20, detail: `v${process.versions.node}` };
 
-    // Codex sandbox writable_roots (so later chats do not need elevation)
-    if (opts.fix) {
-      const sandbox = trySandboxAllow();
-      if (sandbox.ok) {
-        report.sandbox = { ok: true, detail: sandbox.alreadyAllowed ? "已在白名单" : "已写入白名单" };
-        if (sandbox.added) results.push("已将本地设置目录加入 Codex 沙箱白名单");
-      } else {
-        report.sandbox = { ok: false, detail: sandbox.error };
-      }
-    } else {
-      try {
-        const configPath = getCodexConfigPath();
-        const allowed =
-          fs.existsSync(configPath) && isStateDirAllowlisted(fs.readFileSync(configPath, "utf8"), getStateDir());
-        report.sandbox = allowed ? { ok: true, detail: "已在白名单" } : { ok: false, detail: "未在白名单" };
-      } catch (error) {
-        report.sandbox = { ok: false, detail: (error as Error).message };
-      }
-    }
+    // Diagnosis and connection repair never change Codex configuration.
+    report.sandbox = { ok: true, detail: "Codex configuration unchanged; sandbox-allow is a separate explicit action." };
 
     // Workspace
     let workspace: Workspace | null = null;
@@ -927,6 +914,89 @@ session
     }
   });
 
+// Local handoff commands do not start services, connect accounts, or execute a plan.
+const planCmd = program.command("plan").description("Save and resume a user-approved plan locally");
+planCmd.command("approve")
+  .requiredOption("--file <path>", "workspace-relative approved Markdown plan")
+  .requiredOption("--task <id>")
+  .requiredOption("--revision <n>", "new immutable plan revision", parseNonNegativeInteger)
+  .requiredOption("--user-confirmation <text>", "reference to the human's explicit approval")
+  .option("-w, --workspace <path>")
+  .action((opts) => {
+    const ws = new Workspace(resolveWorkspace(opts.workspace));
+    const plan = approvePlan(ws, {file:opts.file, taskId:opts.task, revision:opts.revision, confirmation:opts.userConfirmation});
+    say(JSON.stringify({ok:true, taskId:plan.taskId, revision:plan.revision, digest:plan.digest, baseline:plan.baseline.digest}));
+  });
+planCmd.command("show").option("-w, --workspace <path>").action((opts) => {
+  const ws = new Workspace(resolveWorkspace(opts.workspace));
+  say(JSON.stringify({plan:activePlan(ws), session:readSession(ws.id)}, null, 2));
+});
+planCmd.command("snapshot").option("-w, --workspace <path>").action((opts) => {
+  say(JSON.stringify(snapshotWorkspace(new Workspace(resolveWorkspace(opts.workspace))), null, 2));
+});
+planCmd.command("begin").option("-w, --workspace <path>").action((opts) => {
+  beginPlan(new Workspace(resolveWorkspace(opts.workspace)));
+  check("Baseline matches. Execute only within the user-approved plan.");
+});
+
+const handoff = program.command("handoff").description("Prepare manual review and track delivery; never sends messages");
+handoff.command("export")
+  .requiredOption("--task <id>").requiredOption("--iteration <n>", "iteration", parseNonNegativeInteger)
+  .option("-w, --workspace <path>")
+  .action((opts) => {
+    const ws = new Workspace(resolveWorkspace(opts.workspace));
+    const record = executionFor(ws.id, opts.task, opts.iteration);
+    if (!record?.evidence) throw new Error("No versioned evidence for this iteration");
+    const evidence = record.evidence;
+    const plan = loadPlan(ws, evidence.plan);
+    let current = readSession(ws.id);
+    if (current?.checkpoint?.approvedPlan?.digest !== plan.digest || current.checkpoint.approvedPlan.revision !== plan.revision || current.checkpoint.approvedPlan.taskId !== plan.taskId || current.checkpoint.iteration > opts.iteration) throw new Error("This is not the active plan/iteration; inspect archived records without changing current delivery.");
+    if (current.checkpoint.iteration !== opts.iteration || current.checkpoint.protocolState === "EXECUTING") {
+      current = mergeSession(current, {iteration:opts.iteration, checkpoint:{protocolState:"EXECUTED_LOCAL",waitingFor:"none"}});
+    }
+    const messageId = `c2c-${opts.task}-${opts.iteration}-${evidence.id.slice(0, 16)}`;
+    const previous = current.checkpoint?.delivery;
+    const delivery = previous?.messageId === messageId ? previous : {messageId, evidenceId:evidence.id, status:"prepared" as const};
+    writeSession(ws.id, mergeSession(current, {checkpoint:{delivery}}));
+    const output = record.outputId ? readExecutionOutput(ws.id, record.outputId) : null;
+    let currentSnapshotMatches: boolean | null = null;
+    try { currentSnapshotMatches = snapshotWorkspace(ws).digest === evidence.code.digest; } catch { /* Saved evidence remains exportable when the live snapshot is unavailable. */ }
+    say(JSON.stringify({messageId, delivery:delivery.status, instruction:"Review these saved artifacts. Report exactly which evidence you checked. Suggestions do not authorize goal, method, acceptance or permission changes. If this ID was received before, do not request repeat execution.", approvedPlan:plan, executorReport:record, testOutput:output, reviewerReport:current.checkpoint?.review?.evidenceId === evidence.id ? current.checkpoint.review : null, currentSnapshotMatches, currentSnapshotNote:currentSnapshotMatches === null ? "Live snapshot unavailable; review the saved code identity only." : undefined}, null, 2));
+  });
+handoff.command("delivery")
+  .requiredOption("--message <id>").requiredOption("--status <status>", "uncertain | confirmed")
+  .option("--confirmation <text>", "visible recipient message/reply or human acknowledgement")
+  .option("-w, --workspace <path>")
+  .action((opts) => {
+    const ws = new Workspace(resolveWorkspace(opts.workspace));
+    const saved = readSession(ws.id);
+    const delivery = saved?.checkpoint?.delivery;
+    if (!delivery || delivery.messageId !== opts.message) throw new Error("Unknown message; export first");
+    if (!["uncertain", "confirmed"].includes(opts.status)) throw new Error("Invalid delivery status");
+    if (delivery.status === "confirmed") throw new Error("Already confirmed; inspect the saved conversation, do not resend");
+    if (opts.status === "confirmed" && !opts.confirmation?.trim()) throw new Error("Confirmation requires receipt evidence, not an attempted send");
+    writeSession(ws.id, mergeSession(saved, {checkpoint:{delivery:{...delivery, status:opts.status, confirmation:opts.confirmation}, protocolState:opts.status === "confirmed" ? "EXECUTED_SENT" : "EXECUTED_LOCAL", waitingFor:opts.status === "confirmed" ? "GPT_REVIEW" : "USER"}}));
+    check("Delivery state saved. This command did not send a message.");
+  });
+
+handoff.command("review")
+  .requiredOption("--message <id>").requiredOption("--reviewer <name>")
+  .requiredOption("--checked <text>", "specific files, diffs or recorded outputs actually inspected")
+  .requiredOption("--decision <decision>", "accept | changes_requested | needs_user")
+  .requiredOption("--notes <text>", "findings, limits and any decisions required from the user")
+  .option("-w, --workspace <path>")
+  .action((opts) => {
+    const ws = new Workspace(resolveWorkspace(opts.workspace));
+    const saved = readSession(ws.id);
+    const delivery = saved?.checkpoint?.delivery;
+    if (!delivery || delivery.messageId !== opts.message || delivery.status !== "confirmed") throw new Error("Review requires a confirmed matching message");
+    if (!["accept", "changes_requested", "needs_user"].includes(opts.decision) || !opts.checked.trim()) throw new Error("Specify decision and inspected evidence");
+    const review = {evidenceId:delivery.evidenceId, reviewer:String(opts.reviewer), checked:[String(opts.checked)], decision:opts.decision as "accept" | "changes_requested" | "needs_user", notes:String(opts.notes), source:"reviewer_report" as const};
+    writeSecureJson(path.join(getStateDir(), "sessions", ws.id, "reviews", `${delivery.evidenceId}.json`), review);
+    writeSession(ws.id, mergeSession(saved, {checkpoint:{review, waitingFor:"USER", nextExpectedStep:"Human decides whether to accept or approve a new plan revision. Review does not grant authority."}}));
+    check("Reviewer report saved separately. No plan or permissions were changed.");
+  });
+
 // ---------------------------------------------------------------- generated media handoff
 
 const assetCmd = program
@@ -1118,6 +1188,9 @@ program
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
   .option("--executor <id>", "id of the executor that ran this iteration, e.g. codex")
   .option("--notes <text>")
+  .option("--unverified <text>", "remaining unverified work")
+  .option("--blocker <text>", "blocking condition")
+  .option("--tested-snapshot <digest>", "snapshot digest captured before the test command")
   .option("--command <text>", "command whose output may be offered to ChatGPT")
   .option("--output <text>", "command output (prefer --output-file for long logs)")
   .option("--output-file <path>", "read command output from a local file")
@@ -1132,6 +1205,9 @@ program
       exitStatus: string;
       executor?: string;
       notes?: string;
+      unverified?: string;
+      blocker?: string;
+      testedSnapshot?: string;
       command?: string;
       output?: string;
       outputFile?: string;
@@ -1139,12 +1215,19 @@ program
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
       const changed = parseChangedFiles(opts.changedFiles);
+      const plan = activePlan(workspace);
+      if (plan && plan.taskId !== opts.task) throw new Error("Record task does not match the approved plan.");
+      if (plan && !["EXECUTING", "EXECUTED_LOCAL", "EXECUTED_SENT"].includes(readSession(workspace.id)?.checkpoint?.protocolState ?? "")) throw new Error("Run plan begin before recording execution.");
+      if (plan && executionFor(workspace.id, opts.task, opts.iteration)) throw new Error("Iteration already recorded; export existing evidence instead of re-executing or overwriting.");
+      if (plan && opts.iteration <= (readSession(workspace.id)?.checkpoint?.iteration ?? 0)) throw new Error("Iteration must increase across plan revisions; inspect session before recording.");
       let outputId: number | undefined;
       let outputAvailable = false;
       const rawOutput =
         opts.outputFile !== undefined
           ? readCappedUtf8(path.resolve(opts.outputFile), MAX_RECORD_OUTPUT_READ)
           : opts.output;
+      const reportDigest = createHash("sha256").update(JSON.stringify({iteration:opts.iteration,command:opts.command,output:rawOutput,exitCode:opts.exitCode,tests:opts.tests,exitStatus:opts.exitStatus})).digest("hex");
+      const evidence = plan ? captureEvidence(workspace, plan, {unverified:opts.unverified ? [opts.unverified] : [], blockers:opts.blocker ? [opts.blocker] : [], testedSnapshot:opts.testedSnapshot, reportDigest}) : undefined;
       if (opts.command && rawOutput !== undefined) {
         const savedOutput = saveExecutionOutput(workspace.id, {
           command: opts.command,
@@ -1156,7 +1239,11 @@ program
         outputId = savedOutput.id;
         outputAvailable = savedOutput.allowed;
       }
+      const command = opts.command ? sanitizeExecutionOutput(opts.command) : undefined;
       appendExecutionRecord(workspace.id, {
+        evidence,
+        command: command?.allowed ? command.text : undefined,
+        exitCode: opts.exitCode ?? null,
         taskId: opts.task,
         iteration: opts.iteration,
         changedFiles: changed,
@@ -1168,6 +1255,9 @@ program
         outputId,
         outputAvailable,
       });
+      if (plan) writeSession(workspace.id, mergeSession(readSession(workspace.id), {
+        iteration:opts.iteration, lastState:"EXECUTED", checkpoint:{ protocolState:"EXECUTED_LOCAL", waitingFor:"none", nextExpectedStep:"Request review manually or at the approved milestone; use handoff export." },
+      }));
       if (outputId !== undefined && !outputAvailable) check("已记录执行摘要（输出未对 ChatGPT 开放）");
       else if (outputId !== undefined) check("已记录执行摘要与输出");
       else check("已记录执行摘要");

@@ -294,3 +294,23 @@ describe("gitDiff pagination", () => {
     git(repo, "reset", "--hard", "HEAD");
   });
 });
+
+describe("Git reads do not invoke workspace programs", () => {
+  it("disables external diff, textconv and fsmonitor helpers", () => {
+    const isolated = makeTmpDir("git-no-callbacks");
+    try {
+      makeGitRepo(isolated);
+      write(isolated,"helper.sh","#!/bin/sh\nprintf 'called' > callback-marker\nprintf 'synthetic output'\n");
+      fs.chmodSync(path.join(isolated,"helper.sh"),0o700);
+      git(isolated,"config","diff.external","./helper.sh");
+      git(isolated,"config","core.fsmonitor","./helper.sh");
+      git(isolated,"config","diff.synthetic.textconv","./helper.sh");
+      write(isolated,".gitattributes","*.txt diff=synthetic\n");
+      write(isolated,"hello.txt","synthetic change\n");
+      expect(gitDiff(isolated).diff).toContain("synthetic change");
+      gitStatus(isolated);
+      gitInfo(isolated);
+      expect(fs.existsSync(path.join(isolated,"callback-marker"))).toBe(false);
+    } finally { cleanup(isolated); }
+  });
+});

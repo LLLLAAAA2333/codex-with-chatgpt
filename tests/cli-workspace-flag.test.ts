@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { Workspace } from "../src/workspace/manager.js";
 import { writeTunnelState } from "../src/tunnel/state.js";
@@ -28,7 +29,9 @@ describe("machine-wide commands accept leftover -w", () => {
   });
 
   it("update-check --json -w does not fail with unknown option", () => {
-    dirs.push(isolateStateDir());
+    const updateState = isolateStateDir();
+    dirs.push(updateState);
+    fs.writeFileSync(path.join(updateState, "update-check.json"), JSON.stringify({date:new Date().toLocaleDateString("en-CA"),updateAvailable:false}));
     const result = runCli(["update-check", "--json", "-w", "C:/Projects/aquant"], {
       C2C_STATE_DIR: process.env.C2C_STATE_DIR,
     });
